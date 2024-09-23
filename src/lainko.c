@@ -21,6 +21,8 @@
 #include <linux/mempolicy.h>
 #include <linux/ptrace.h>
 
+#include <linux/kprobes.h>
+
 #include <linux/slab.h>
 #include <linux/gfp.h>
 
@@ -49,7 +51,6 @@ MODULE_VERSION("1.0");
 #define CLASS_NAME "lainko"           //class will appear as  /sys/class/lainko
 
 #define MEMU_MAP_SZ_XTRA_PCNT 10      //determines extra % in map buf (see design.txt)
-
 
 
 //globals
@@ -93,6 +94,41 @@ static ssize_t lainmemu_major_show(struct device * dev,
 static struct device_attribute lainmemu_major_attr = __ATTR_RO(lainmemu_major);
 
 
+//un-exported symbols 
+static char * symbols[] = {
+    "kallsyms_lookup_name",
+    "access_remote_vm",
+    "get_task_policy",
+    "get_gate_vma",
+    "__mpol_put",
+    "mm_access"
+};
+
+#define SYMBOLS_LEN 6
+
+#define SYM_KALLSYMS_LOOKUP_NAME 0
+#define SYM_ACCESS_REMOTE_VM     1
+#define SYM_GET_TASK_POLICY      2
+#define SYM_GET_GATE_VMA         3
+#define SYM_MPOL_PUT             4
+#define SYM_MM_ACCESS            5
+
+
+struct resolved_symbols{
+
+    unsigned long (*kallsyms_lookup_name)(const char *);
+    
+    int (*access_remote_vm)(struct mm_struct *, unsigned long, 
+                            void *, int, unsigned int);
+    struct mempolicy * (*get_task_policy)(struct task_struct *);
+    struct vm_area_struct * (*get_gate_vma)(struct mm_struct *);
+    void (*__mpol_put)(struct mempolicy *);
+    struct mm_struct * (*mm_access)(struct task_struct *, unsigned int);
+
+};
+static struct resolved_symbols r_symbols;
+
+
 //local memu data
 struct local_data {
 
@@ -109,7 +145,7 @@ struct local_data {
 
 
 
-// --- SYSFS ---
+// --- SYSFS
 static ssize_t lainmemu_major_show(struct device * dev, 
                                    struct device_attribute * attr, char * buf) {
 
@@ -117,7 +153,88 @@ static ssize_t lainmemu_major_show(struct device * dev,
 }
 
 
-// --- INIT ---
+
+// --- INIT INTERNALS
+
+//empty kprobe
+static int empty_kprobe(struct kprobe * kp, struct pt_regs * regs) {
+
+    return 0;
+}
+
+
+//get the address of kallsyms_lookup_name
+static long get_kallsyms_lookup_name(void) {
+
+    int ret;
+
+    struct kprobe kallsyms_kp;
+
+    //insert kprobe
+    kallsyms_kp.symbol_name = symbols[SYM_KALLSYMS_LOOKUP_NAME];
+    kallsyms_kp.pre_handler = empty_kprobe;
+
+    ret = register_kprobe(&kallsyms_kp);
+    if (ret < 0) {
+        printk(KERN_ALERT "[lainko][ERR] failed to register kallsyms kprobe.\n");
+        return -1;
+    }
+
+    //extract address of kallsyms_lookup_name from kprobe
+    r_symbols.kallsyms_lookup_name = (unsigned long (*)(const char * name)) 
+                                     kallsyms_kp.addr;
+    //remove kprobe
+    unregister_kprobe(&kallsyms_kp);
+
+    printk(KERN_INFO "[lainko][OK] acquired address of kallsyms_lookup_name().\n");
+
+    return 0;
+}
+
+
+// --- INIT
+
+//find un-exported symbols
+static long locate_symbols(void) {
+
+    //setup init
+    long ret;
+    unsigned long addr;
+
+    //find address of function used to lookup symbols
+    ret = get_kallsyms_lookup_name();
+    if (ret) return -1;
+
+    //access_remote_vm
+    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_ACCESS_REMOTE_VM]);
+    if (addr == 0) return -1;
+    r_symbols.access_remote_vm = (int (*)(struct mm_struct *, unsigned long,
+                                  void *, int, unsigned int)) addr;
+
+    //get_task_policy
+    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_GET_TASK_POLICY]);
+    if (addr == 0) return -1;
+    r_symbols.get_task_policy = (struct mempolicy * (*)(struct task_struct *)) addr;
+
+    //get_gate_vma
+    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_GET_GATE_VMA]);
+    if (addr == 0) return -1;
+    r_symbols.get_gate_vma = (struct vm_area_struct * (*)(struct mm_struct *)) addr;
+
+    //__mpol_put
+    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_MPOL_PUT]);
+    if (addr == 0) return -1;
+    r_symbols.__mpol_put = (void (*)(struct mempolicy *)) addr;
+
+    //mm_access
+    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_MM_ACCESS]);
+    if (addr == 0) return -1;
+    r_symbols.mm_access = (struct mm_struct * (*)(struct task_struct *, unsigned int))
+                          addr;
+
+    return 0;
+}
+
 
 //get a dynamic major number
 static long memu_register_major(void) {
@@ -136,6 +253,7 @@ static long memu_register_major(void) {
 
     return 0;
 }
+
 
 //create new lainko class
 static long register_class(void) {
@@ -158,7 +276,8 @@ static long register_class(void) {
 static long memu_register_device(void) {
 
     lainmemu_device =
-        device_create(lainko_class, NULL, MKDEV(lainmemu_major, 0), NULL, MEMU_DEVICE_NAME); 
+        device_create(lainko_class, NULL, MKDEV(lainmemu_major, 0), 
+                      NULL, MEMU_DEVICE_NAME); 
     if (unlikely(IS_ERR(lainmemu_device))) {
         
         class_destroy(lainko_class);
@@ -198,11 +317,9 @@ static long memu_register_major_attr(void) {
 //fill lainmemu ioctl numbers
 static long memu_fill_ioctl_nums(void) {
 
-    //TODO check if _IOWR is necessary when doing copy_to/from_user()
     lainmemu_ioctl_open_tgt    = _IOW((char) lainmemu_major, LAINMEMU_IOCTL_OPEN_TGT, 
                                       struct ioctl_arg);
-    lainmemu_ioctl_release_tgt = _IOW((char) lainmemu_major, LAINMEMU_IOCTL_RELEASE_TGT,
-                                      struct ioctl_arg);
+    lainmemu_ioctl_release_tgt = _IO((char) lainmemu_major, LAINMEMU_IOCTL_RELEASE_TGT);
     lainmemu_ioctl_get_map     = _IOWR((char) lainmemu_major, LAINMEMU_IOCTL_GET_MAP,
                                        struct ioctl_arg);
     lainmemu_ioctl_get_map_sz  = _IOW((char) lainmemu_major, LAINMEMU_IOCTL_GET_MAP_SZ,
@@ -210,10 +327,10 @@ static long memu_fill_ioctl_nums(void) {
     return 0;
 }
 
-
 static long (*init_fn[])(void)
-                = {memu_register_major, register_class, memu_register_device,
-                   memu_register_major_attr, memu_fill_ioctl_nums};
+                = {locate_symbols, memu_register_major, register_class, 
+                   memu_register_device, memu_register_major_attr, 
+                   memu_fill_ioctl_nums};
 #define INIT_FN_LEN (sizeof(init_fn) / sizeof(init_fn[0]))
 
 
@@ -242,7 +359,7 @@ static int __attribute__((unused)) __init lainko_init(void) {
 
 
 //on lkm unload
-static int __attribute__((unused)) __exit lainko_exit(void) {
+static void __attribute__((unused)) __exit lainko_exit(void) {
     
     device_destroy(lainko_class, MKDEV(lainmemu_major, 0));
     class_unregister(lainko_class);
@@ -250,8 +367,13 @@ static int __attribute__((unused)) __exit lainko_exit(void) {
     unregister_chrdev(lainmemu_major, MEMU_DEVICE_NAME);
     printk(KERN_INFO "[lain][OK] module successfully unloaded.\n");
 
-    return 0;
+    return;
 }
+
+
+//register load & unload functions
+module_init(lainko_init);
+module_exit(lainko_exit);
 
 
 // -- IOCTL INTERNALS
@@ -299,7 +421,7 @@ static struct mm_struct * get_mm_struct(struct task_struct * task) {
 
     struct mm_struct * mm;
     
-    mm = mm_access(task, PTRACE_MODE_ATTACH | PTRACE_MODE_FSCREDS | PTRACE_MODE_READ);
+    mm = r_symbols.mm_access(task, PTRACE_MODE_ATTACH | PTRACE_MODE_FSCREDS);
     if (IS_ERR_OR_NULL(mm)) {
 
         if (mm == NULL) return ERR_PTR(-EFAULT);
@@ -356,7 +478,7 @@ static int prepare_map_operations(struct local_data * l_data_ptr,
     //fetch and lock mempolicy of target task 
     task_lock(l_data_ptr->target_task);
 
-    l_data_ptr->target_mpol = get_task_policy(l_data_ptr->target_task);
+    l_data_ptr->target_mpol = r_symbols.get_task_policy(l_data_ptr->target_task);
     mpol_get(l_data_ptr->target_mpol);
 
     task_unlock(l_data_ptr->target_task);
@@ -369,14 +491,14 @@ static int prepare_map_operations(struct local_data * l_data_ptr,
 static void cleanup_map_operations(struct local_data * l_data_ptr) {
 
     mmput(l_data_ptr->target_mm);
-    mpol_put(l_data_ptr->target_mpol);
+    r_symbols.__mpol_put(l_data_ptr->target_mpol);
 }
 
 
 //fill vm_entry with relevant parts of vm_area_struct
-static int build_vm_entry(struct vm_entry * vm_ent, struct vm_area_struct * vma) {
+static int build_vm_entry(struct vm_entry * vm_ent, 
+                          struct vm_area_struct * vma, char * path_buf) {
 
-    char path_buf[PATH_MAX];
     char * path_str;
 
 
@@ -446,13 +568,13 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
 
     int ret;
     unsigned long bytes_not_copied;
-    int count = 0;
+    char * path_buf;
 
-    loff_t buf_off = 0; 
+    int count = 0;
 
     struct vm_area_struct * vma;
     struct vma_iterator vma_iter;
-    struct vm_entry vm_ent;
+    struct vm_entry * vm_ent;
 
 
     //allocate buffer for the map
@@ -460,32 +582,41 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
                                    GFP_KERNEL | __GFP_RETRY_MAYFAIL);
     if (l_data_ptr->tx_buf == NULL) return -ENOMEM;
 
+    //allocate pathname buffer
+    path_buf = __vmalloc(PATH_MAX, GFP_KERNEL);
+    if (path_buf == NULL) {
+        vfree(l_data_ptr->tx_buf);
+        return -ENOMEM;
+    }
+
     //acquire locks & vma iterator
     ret = prepare_map_operations(l_data_ptr, &vma_iter);
     if (ret) return ret;
 
+    //initialise vm_ent pointer
+    vm_ent = (struct vm_entry *) l_data_ptr->tx_buf;
     
     //while there are VMAs left and there is space in the buffer
     while ( ((vma = vma_next(&vma_iter)) != NULL) && (count < l_data_ptr->vm_map_sz) ) {
 
-        //build vm_entry
-        ret = build_vm_entry(&vm_ent, vma);
+        //build vm_entry inside buffer
+        ret = build_vm_entry(vm_ent, vma, path_buf);
         if (ret) {
             cleanup_map_operations(l_data_ptr);
+            vfree(path_buf);
             vfree(l_data_ptr->tx_buf);
             return ret;
         }
 
-        //copy vm_entry into transmission buffer
-        memcpy(l_data_ptr->tx_buf + buf_off, &vm_ent, sizeof(vm_ent));
-        buf_off += sizeof(vm_ent);
+        //advance loop state
+        vm_ent += 1;
         ++count;
 
     } //end while
     
 
     //get gate vma    
-    vma = get_gate_vma(l_data_ptr->target_mm);
+    vma = r_symbols.get_gate_vma(l_data_ptr->target_mm);
 
     //if no gate vma present (rare arch?)
     if (vma == NULL) {
@@ -493,16 +624,16 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
     
     //add gate vma to buffer
     } else {
-        ret = build_vm_entry(&vm_ent, vma);
+        ret = build_vm_entry(vm_ent, vma, path_buf);
         if (ret) {
             cleanup_map_operations(l_data_ptr);
+            vfree(path_buf);
             vfree(l_data_ptr->tx_buf);
             return ret;
         }
 
         //copy gate vma into transmission buffer
-        memcpy(l_data_ptr->tx_buf + buf_off, &vm_ent, sizeof(vm_ent));
-        buf_off += sizeof(vm_ent);
+        vm_ent += 1;
         ++count;
 
     } //end if
@@ -513,11 +644,11 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
                                     count * sizeof(struct vm_entry));
 
     cleanup_map_operations(l_data_ptr);
+    vfree(path_buf);
     vfree(l_data_ptr->tx_buf);
 
     if (bytes_not_copied) return -EFAULT;
-    return 0;
-
+    return count;
 }
 
 
@@ -605,7 +736,7 @@ static ssize_t mem_rw(struct mm_struct * mm, char __user * u_buf,
         }
 
         //perform the read/write operation into another vma space
-        this_len = access_remote_vm(mm, remote_addr, page, this_len, flags);
+        this_len = r_symbols.access_remote_vm(mm, remote_addr, page, this_len, flags);
         if (!this_len) {
             if (!copied) copied = -EIO;
         }
