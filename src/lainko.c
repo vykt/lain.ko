@@ -157,9 +157,19 @@ static ssize_t lainmemu_major_show(struct device * dev,
 // --- INIT INTERNALS
 
 //empty kprobe
-static int empty_kprobe(struct kprobe * kp, struct pt_regs * regs) {
+static int kallsyms_kprobe(struct kprobe * kp, struct pt_regs * regs) { 
 
     return 0;
+}
+
+
+//print symbol address to dmesg
+static inline void print_symbol(int symbol_index) {
+
+    printk(KERN_INFO "[lainko][OK] symbol resolved: %s : 0x%lx\n", 
+	   symbols[symbol_index],
+	   *(((unsigned long *) &r_symbols) + symbol_index));
+    return;
 }
 
 
@@ -172,7 +182,7 @@ static long get_kallsyms_lookup_name(void) {
 
     //insert kprobe
     kallsyms_kp.symbol_name = symbols[SYM_KALLSYMS_LOOKUP_NAME];
-    kallsyms_kp.pre_handler = empty_kprobe;
+    kallsyms_kp.pre_handler = kallsyms_kprobe;
 
     ret = register_kprobe(&kallsyms_kp);
     if (ret < 0) {
@@ -183,6 +193,8 @@ static long get_kallsyms_lookup_name(void) {
     //extract address of kallsyms_lookup_name from kprobe
     r_symbols.kallsyms_lookup_name = (unsigned long (*)(const char * name)) 
                                      kallsyms_kp.addr;
+    print_symbol(SYM_KALLSYMS_LOOKUP_NAME);
+
     //remove kprobe
     unregister_kprobe(&kallsyms_kp);
 
@@ -210,27 +222,32 @@ static long locate_symbols(void) {
     if (addr == 0) return -1;
     r_symbols.access_remote_vm = (int (*)(struct mm_struct *, unsigned long,
                                   void *, int, unsigned int)) addr;
+    print_symbol(SYM_ACCESS_REMOTE_VM);
 
     //get_task_policy
     addr = r_symbols.kallsyms_lookup_name(symbols[SYM_GET_TASK_POLICY]);
     if (addr == 0) return -1;
     r_symbols.get_task_policy = (struct mempolicy * (*)(struct task_struct *)) addr;
+    print_symbol(SYM_GET_TASK_POLICY);
 
     //get_gate_vma
     addr = r_symbols.kallsyms_lookup_name(symbols[SYM_GET_GATE_VMA]);
     if (addr == 0) return -1;
     r_symbols.get_gate_vma = (struct vm_area_struct * (*)(struct mm_struct *)) addr;
+    print_symbol(SYM_GET_GATE_VMA);
 
     //__mpol_put
     addr = r_symbols.kallsyms_lookup_name(symbols[SYM_MPOL_PUT]);
     if (addr == 0) return -1;
     r_symbols.__mpol_put = (void (*)(struct mempolicy *)) addr;
+    print_symbol(SYM_MPOL_PUT);
 
     //mm_access
     addr = r_symbols.kallsyms_lookup_name(symbols[SYM_MM_ACCESS]);
     if (addr == 0) return -1;
     r_symbols.mm_access = (struct mm_struct * (*)(struct task_struct *, unsigned int))
                           addr;
+    print_symbol(SYM_MM_ACCESS);
 
     return 0;
 }
