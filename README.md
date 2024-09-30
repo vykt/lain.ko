@@ -1,6 +1,6 @@
 # lainko
 
-![lainko](lainko.gif)
+<img src="lainko.gif" width="50%" height="50%"/>
 
 ### NOTICE:
 
