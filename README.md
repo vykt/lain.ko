@@ -1,6 +1,6 @@
 # lainko
 
-<img src="lainko.gif" width="50%" height="50%"/>
+<img src="lainko.gif" width="25%" height="25%"/>
 
 ### NOTICE:
 
