@@ -1,7 +1,9 @@
 obj-m += lainko.o
+EXTRA_CFLAGS=-O1
 
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	make -C /home/vykt/linux-source-6.10/ M=$(PWD) modules
 
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	#make -C /home/vykt/linux-source-6.10/ M=$(PWD) clean
+	rm Module.symvers compile.err lainko.ko lainko.mod lainko.mod.c lainko.mod.o lainko.o modules.order

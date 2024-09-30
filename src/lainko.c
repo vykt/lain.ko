@@ -88,10 +88,10 @@ static struct file_operations file_ops = {
 
 
 //sysfs attributes
-static ssize_t lainmemu_major_show(struct device * dev, 
-                               struct device_attribute * attr, char * buf);
+static ssize_t lainmemu_major_show(const struct class * class, 
+                                   const struct class_attribute * attr, char * buf);
 
-static struct device_attribute lainmemu_major_attr = __ATTR_RO(lainmemu_major);
+static struct class_attribute lainmemu_major_attr = __ATTR_RO(lainmemu_major);
 
 
 //un-exported symbols 
@@ -146,10 +146,10 @@ struct local_data {
 
 
 // --- SYSFS
-static ssize_t lainmemu_major_show(struct device * dev, 
-                                   struct device_attribute * attr, char * buf) {
+static ssize_t lainmemu_major_show(const struct class * class, 
+                                   const struct class_attribute * attr, char * buf) {
 
-    return sprintf(buf, "%d\n", lainmemu_major);
+    return sprintf(buf, "%d\n", (unsigned char) lainmemu_major);
 }
 
 
@@ -266,7 +266,7 @@ static long memu_register_major(void) {
     }
 
     printk(KERN_INFO 
-      "[lainmemu][OK] registered with major device number %d.\n", lainmemu_major);
+      "[lainmemu][OK] registered with major device number %d.\n", (unsigned char) lainmemu_major);
 
     return 0;
 }
@@ -314,7 +314,7 @@ static long memu_register_major_attr(void) {
 
     int ret;
 
-    ret = device_create_file(lainmemu_device, &lainmemu_major_attr);
+    ret = class_create_file(lainko_class, &lainmemu_major_attr);
     if (unlikely(ret)) {
         device_destroy(lainko_class, MKDEV(lainmemu_major, 0));
         class_destroy(lainko_class);
@@ -334,13 +334,20 @@ static long memu_register_major_attr(void) {
 //fill lainmemu ioctl numbers
 static long memu_fill_ioctl_nums(void) {
 
-    lainmemu_ioctl_open_tgt    = _IOW((char) lainmemu_major, LAINMEMU_IOCTL_OPEN_TGT, 
-                                      struct ioctl_arg);
-    lainmemu_ioctl_release_tgt = _IO((char) lainmemu_major, LAINMEMU_IOCTL_RELEASE_TGT);
-    lainmemu_ioctl_get_map     = _IOWR((char) lainmemu_major, LAINMEMU_IOCTL_GET_MAP,
-                                       struct ioctl_arg);
-    lainmemu_ioctl_get_map_sz  = _IOW((char) lainmemu_major, LAINMEMU_IOCTL_GET_MAP_SZ,
-                                      struct ioctl_arg);
+    lainmemu_ioctl_open_tgt    = _IOW(lainmemu_major, LAINMEMU_IOCTL_OPEN_TGT, 
+                                      struct ioctl_arg *);
+    lainmemu_ioctl_release_tgt = _IO(lainmemu_major, LAINMEMU_IOCTL_RELEASE_TGT);
+    lainmemu_ioctl_get_map     = _IOWR(lainmemu_major, LAINMEMU_IOCTL_GET_MAP,
+                                       struct ioctl_arg *);
+    lainmemu_ioctl_get_map_sz  = _IOW(lainmemu_major, LAINMEMU_IOCTL_GET_MAP_SZ,
+                                      struct ioctl_arg *);
+    
+    printk(KERN_INFO "[lainmemu][OK] open_tgt: %8x, release_tgt: %8x, get_map: %8x, get_map_sz: %8x\n",
+      lainmemu_ioctl_open_tgt, lainmemu_ioctl_release_tgt, lainmemu_ioctl_get_map, lainmemu_ioctl_get_map_sz);
+
+    printk(KERN_INFO
+      "[lainmemu][OK] registered lainmemu ioctl calls.\n");
+
     return 0;
 }
 
@@ -417,6 +424,8 @@ static struct task_struct * task_by_pid(struct local_data * l_data_ptr, pid_t pi
 
     struct task_struct * iter;
 
+    printk(KERN_INFO "[lainmemu][OK] looking for task struct for %d\n", pid);
+
     //for each task in task list
     for_each_process(iter) {
 
@@ -425,6 +434,8 @@ static struct task_struct * task_by_pid(struct local_data * l_data_ptr, pid_t pi
 
             get_task_struct(iter);
             l_data_ptr->target_task = iter;
+
+	    printk("[lainmemu][OK] found task struct for %d at 0x%8lx.\n", pid, (unsigned long) l_data_ptr->target_task);
             return iter;
         }
     } //end for
@@ -486,7 +497,8 @@ static int prepare_map_operations(struct local_data * l_data_ptr,
     if (mmap_read_lock_killable(l_data_ptr->target_mm)) {
 
         mmput(l_data_ptr->target_mm);
-        return -EINTR;
+	printk(KERN_INFO "[lainmemu][OK] failed to acquire write lock on mm_struct for %d.\n", l_data_ptr->target_task->pid);
+	return -EINTR;
     }
 
     //get an iterator on vmas
@@ -500,6 +512,8 @@ static int prepare_map_operations(struct local_data * l_data_ptr,
 
     task_unlock(l_data_ptr->target_task);
 
+    printk(KERN_INFO "[lainmemu][OK] prepared map operations for %d.\n", l_data_ptr->target_task->pid);
+
     return 0;
 }
 
@@ -509,6 +523,8 @@ static void cleanup_map_operations(struct local_data * l_data_ptr) {
 
     mmput(l_data_ptr->target_mm);
     r_symbols.__mpol_put(l_data_ptr->target_mpol);
+
+    printk(KERN_INFO "[lainmemu][OK] cleaned up map operations for %d.\n", l_data_ptr->target_task->pid);
 }
 
 
@@ -557,12 +573,14 @@ static int memu_open_tgt(struct local_data * l_data_ptr, struct ioctl_arg * arg)
     //open new target
     task_ret = task_by_pid(l_data_ptr, arg->target_pid);
     if (IS_ERR(task_ret)) {
+	printk(KERN_INFO "[lainmemu][OK] failed to find task_struct for %d.\n", arg->target_pid);
         return (int) PTR_ERR(task_ret);
     }
 
     //become user of target's virtual memory
     mm_ret = get_mm_struct(task_ret);
     if (IS_ERR(mm_ret)) {
+	printk(KERN_INFO "[lainmemu][OK] failed to acquire mm_struct for %d.\n", arg->target_pid);
         return (int) PTR_ERR(mm_ret);
     }
 
@@ -677,6 +695,8 @@ static int memu_get_map_sz(struct local_data * l_data_ptr) {
 
     struct vm_area_struct * vma;
     struct vma_iterator vma_iter;
+
+    printk(KERN_INFO "[lainmemu][OK] acquiring map size for target.\n");
 
     //acquire locks & vma iterator
     ret = prepare_map_operations(l_data_ptr, &vma_iter);
@@ -817,6 +837,9 @@ static int memu_open(struct inode * inode_ptr, struct file * file_ptr) {
         return -ENOMEM;
     }
 
+    volatile char x = lainmemu_major;
+    printk("x = %x\n", lainmemu_major);
+
     printk(KERN_INFO "[lainmemu][OK] device successfully opened.\n");
 
     return 0;
@@ -840,7 +863,7 @@ static int memu_release(struct inode * inode_ptr, struct file * file_ptr) {
 
 //on ioctl
 static long memu_ioctl(struct file * file_ptr, 
-                       unsigned int ioctl_index, unsigned long ioctl_arg_uptr) {
+                       unsigned int ioctl_call, unsigned long ioctl_arg_uptr) {
 
     int ret;
     struct local_data * l_data_ptr;
@@ -852,31 +875,28 @@ static long memu_ioctl(struct file * file_ptr,
     //get ioctl arg from userspace
     ret = get_ioctl_arg(&arg, (struct ioctl_arg __user *) ioctl_arg_uptr);
     if (ret) return ret;
-
-
-    switch(ioctl_index) {
-
-        case LAINMEMU_IOCTL_OPEN_TGT:            
-            ret = memu_open_tgt(l_data_ptr, &arg);
-            break;
-
-        case LAINMEMU_IOCTL_RELEASE_TGT:
-            ret = memu_release_tgt(l_data_ptr);
-            break;
-
-        case LAINMEMU_IOCTL_GET_MAP:
-            ret = memu_get_map(l_data_ptr, &arg);
-            break;
-
-        case LAINMEMU_IOCTL_GET_MAP_SZ:
-            ret = memu_get_map_sz(l_data_ptr);
-            break;
-
-        default:
-            ret = -ENOTTY;
-
-    } //end switch
     
+    //open target
+    if (ioctl_call == lainmemu_ioctl_open_tgt) { 
+	ret = memu_open_tgt(l_data_ptr, &arg);
+    
+    //release target
+    } else if (ioctl_call == lainmemu_ioctl_release_tgt) { 
+	ret = memu_release_tgt(l_data_ptr);
+    
+    //return map
+    } else if (ioctl_call == lainmemu_ioctl_get_map) { 
+	ret = memu_get_map(l_data_ptr, &arg);
+    
+    //return map size
+    } else if (ioctl_call == lainmemu_ioctl_get_map_sz) {
+	ret = memu_get_map_sz(l_data_ptr);
+    
+    //return error - not implemented
+    } else {
+        ret = -ENOTTY;
+    }
+
     return ret;
 }
 
