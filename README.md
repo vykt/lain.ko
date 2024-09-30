@@ -8,14 +8,14 @@ This is the raw interface to the <i>lainko</i> module. You probably want to use 
 
 ### INTERFACE:
 
-#### [introduction]:
+#### [introduction]
 
 The <i>lainko</i> module creates a character device <i>/dev/lainmemu</i> and a sysfs class <i>/sys/class/lainko</i>. The major number identifying the <i>lainmemu</i> device is generated dynamically. To find out it's value, the attribute file <i>/sys/class/lainko/lainmemu_major</i> exposes <i>lainmemu</i>'s major number.
 
 In the future, additional devices may be added to lainko to provide other features.
 
 
-#### [the lainmemu device]:
+#### [the lainmemu device]
 
 The <i>lainmemu</i> character device defines the following file operations:
 ```
@@ -34,7 +34,7 @@ The following ioctl calls are defined:
 - 4 : Get the memory map.
 ```
 
-#### [lainmemu file operations]:
+#### [lainmemu file operations]
 
 The <i>lainmemu</i> device does not have to be shared. Each open call allocates private storage tied to that file descriptor. This means multiple 
 processes can make use of the lainmemu device simultaneously. This also means a single process may open the device multiple times to operate on multiple devices simultaneously.
@@ -42,7 +42,7 @@ processes can make use of the lainmemu device simultaneously. This also means a 
 The <i>seek()</i>, <i>read()</i>, and <i>write()</i> operations act on the memory of a target process. They should behave identically to operations performed on the <i>/proc/[pid]/mem</i> file.
 
 
-#### [lainmemu ioctl calls]:
+#### [lainmemu ioctl calls]
 
 All ioctl calls take as their argument a userspace pointer to an instance of <i>struct ioct_arg</i> defined in <i>lainko.h</i>.
 
