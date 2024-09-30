@@ -1,5 +1,6 @@
 # lainko
-Kernel interface for foreign process memory manipulation.
+
+![lainko](lainko.gif)
 
 ### NOTICE:
 
