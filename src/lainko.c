@@ -87,6 +87,15 @@ static struct file_operations file_ops = {
 
 
 
+//procfs vma name format strings
+static const char * lainko_procfs_shmem = "[shmem:%s]";
+static const char * lainko_procfs_anon = "[anon:%s]";
+static const char * lainko_procfs_stack = "[stack]";
+static const char * lainko_procfs_heap = "[heap]";
+static const char * lainko_procfs_vdso = "[vdso]";
+
+
+
 //sysfs attributes
 static ssize_t lainmemu_major_show(const struct class * class, 
                                    const struct class_attribute * attr, char * buf);
@@ -100,8 +109,8 @@ static char * symbols[] = {
     "access_remote_vm",
     "get_task_policy",
     "get_gate_vma",
-    "__mpol_put",
-    "mm_access"
+    "mm_access",
+    "arch_vma_name"
 };
 
 #define SYMBOLS_LEN 6
@@ -110,8 +119,8 @@ static char * symbols[] = {
 #define SYM_ACCESS_REMOTE_VM     1
 #define SYM_GET_TASK_POLICY      2
 #define SYM_GET_GATE_VMA         3
-#define SYM_MPOL_PUT             4
-#define SYM_MM_ACCESS            5
+#define SYM_MM_ACCESS            4
+#define SYM_ARCH_VMA_NAME        5
 
 
 struct resolved_symbols{
@@ -122,9 +131,8 @@ struct resolved_symbols{
                             void *, int, unsigned int);
     struct mempolicy * (*get_task_policy)(struct task_struct *);
     struct vm_area_struct * (*get_gate_vma)(struct mm_struct *);
-    void (*__mpol_put)(struct mempolicy *);
     struct mm_struct * (*mm_access)(struct task_struct *, unsigned int);
-
+    const char * (*arch_vma_name)(struct vm_area_struct *);
 };
 static struct resolved_symbols r_symbols;
 
@@ -236,18 +244,18 @@ static long locate_symbols(void) {
     r_symbols.get_gate_vma = (struct vm_area_struct * (*)(struct mm_struct *)) addr;
     print_symbol(SYM_GET_GATE_VMA);
 
-    //__mpol_put
-    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_MPOL_PUT]);
-    if (addr == 0) return -1;
-    r_symbols.__mpol_put = (void (*)(struct mempolicy *)) addr;
-    print_symbol(SYM_MPOL_PUT);
-
     //mm_access
     addr = r_symbols.kallsyms_lookup_name(symbols[SYM_MM_ACCESS]);
     if (addr == 0) return -1;
     r_symbols.mm_access = (struct mm_struct * (*)(struct task_struct *, unsigned int))
                           addr;
     print_symbol(SYM_MM_ACCESS);
+
+    //arch_vma_struct
+    addr = r_symbols.kallsyms_lookup_name(symbols[SYM_ARCH_VMA_NAME]);
+    if (addr == 0) return -1;
+    r_symbols.arch_vma_name = (const char * (*)(struct vm_area_struct *)) addr;
+    print_symbol(SYM_ARCH_VMA_NAME);
 
     return 0;
 }
@@ -424,7 +432,7 @@ static struct task_struct * task_by_pid(struct local_data * l_data_ptr, pid_t pi
 
     struct task_struct * iter;
 
-    printk(KERN_INFO "[lainmemu][OK] looking for task struct for %d\n", pid);
+    printk(KERN_INFO "[lainmemu][OK] looking for task struct for %d.\n", pid);
 
     //for each task in task list
     for_each_process(iter) {
@@ -432,10 +440,14 @@ static struct task_struct * task_by_pid(struct local_data * l_data_ptr, pid_t pi
         //if this is the target
         if (iter->pid == pid) {
 
+            printk("[lainmemu][OK] old task->usage is %d.\n", 
+		   iter->usage.refs.counter);
+
             get_task_struct(iter);
             l_data_ptr->target_task = iter;
 
-	    printk("[lainmemu][OK] found task struct for %d at 0x%8lx.\n", pid, (unsigned long) l_data_ptr->target_task);
+	    printk(KERN_INFO "[lainmemu][OK] found task struct for %d at 0x%8lx.\n", 
+                   pid, (unsigned long) l_data_ptr->target_task);
             return iter;
         }
     } //end for
@@ -456,10 +468,15 @@ static struct mm_struct * get_mm_struct(struct task_struct * task) {
         return mm;
     }
 
+    printk(KERN_INFO "[lainmemu][OK] old mm->mm_count is %d.\n", 
+	   mm->mm_count.counter);
+    printk(KERN_INFO "[lainmemu][OK] old mm->mm_users is %d.\n",
+	   mm->mm_users.counter - 1); //see mmput() comment
+
     //prevent mm_struct from being free'd
     mmgrab(mm);
 
-    //do not prevent the corresponding VA space from being free'd
+    //mm_access() calls mmget() internally, which isn't needed
     mmput(mm);
 
     return mm;
@@ -472,13 +489,20 @@ static void release_task_mm(struct local_data * l_data_ptr) {
     //decrement mm counter
     if (l_data_ptr->target_mm != NULL) {
         mmdrop(l_data_ptr->target_mm);
+        printk(KERN_INFO "[lainmemu][OK] new mm->mm_count is %d.\n", 
+	       l_data_ptr->target_mm->mm_count.counter);
+        printk(KERN_INFO "[lainmemu][OK] new mm->mm_users is %d.\n", 
+	       l_data_ptr->target_mm->mm_users.counter);
         l_data_ptr->target_mm = NULL;
     }
 
     //decrement task counter
     if (l_data_ptr->target_task != NULL) {
         put_task_struct(l_data_ptr->target_task);
-        l_data_ptr->target_mm = NULL;
+        printk(KERN_INFO "[lainmemu][OK] new task->usage is %d.\n", 
+               l_data_ptr->target_task->usage.refs.counter);
+
+        l_data_ptr->target_task = NULL;
     }
 }
 
@@ -487,32 +511,32 @@ static void release_task_mm(struct local_data * l_data_ptr) {
 static int prepare_map_operations(struct local_data * l_data_ptr,
                                   struct vma_iterator * vma_iter) {
 
+    printk(KERN_INFO 
+      "[lainmemu][OK] preparing map operations for %d.\n", 
+      l_data_ptr->target_task->pid);
+
     //check target is set
     if (l_data_ptr->target_task == NULL) return -ESRCH;
 
-    //increment users of mm_struct, unless its 0
+    //increment users of mm_struct's address space, unless its already 0
     if (!mmget_not_zero(l_data_ptr->target_mm)) return -ESRCH;
 
-    //set write lock on mm
+    //prevent memory map from being altered
     if (mmap_read_lock_killable(l_data_ptr->target_mm)) {
 
         mmput(l_data_ptr->target_mm);
-	printk(KERN_INFO "[lainmemu][OK] failed to acquire write lock on mm_struct for %d.\n", l_data_ptr->target_task->pid);
+	printk(KERN_INFO 
+	       "[lainmemu][OK] failed to write lock mm_struct for %d.\n", 
+	       l_data_ptr->target_task->pid);
 	return -EINTR;
     }
 
     //get an iterator on vmas
     vma_iter_init(vma_iter, l_data_ptr->target_mm, 0);
 
-    //fetch and lock mempolicy of target task 
-    task_lock(l_data_ptr->target_task);
-
-    l_data_ptr->target_mpol = r_symbols.get_task_policy(l_data_ptr->target_task);
-    mpol_get(l_data_ptr->target_mpol);
-
-    task_unlock(l_data_ptr->target_task);
-
-    printk(KERN_INFO "[lainmemu][OK] prepared map operations for %d.\n", l_data_ptr->target_task->pid);
+    printk(KERN_INFO 
+	   "[lainmemu][OK] prepared map operations for %d.\n", 
+	   l_data_ptr->target_task->pid);
 
     return 0;
 }
@@ -521,10 +545,75 @@ static int prepare_map_operations(struct local_data * l_data_ptr,
 //release map operation related locks
 static void cleanup_map_operations(struct local_data * l_data_ptr) {
 
+    printk(KERN_INFO 
+	   "[lainmemu][OK] cleaning up map operations for %d.\n", 
+	   l_data_ptr->target_task->pid);
+    
+    //release memory map lock
+    mmap_read_unlock(l_data_ptr->target_mm);
+
+    //decrement users of mm_struct's address space
     mmput(l_data_ptr->target_mm);
-    r_symbols.__mpol_put(l_data_ptr->target_mpol);
 
     printk(KERN_INFO "[lainmemu][OK] cleaned up map operations for %d.\n", l_data_ptr->target_task->pid);
+}
+
+
+//get the name for this vma, exactly same way as procfs for parity
+static inline void get_vma_name(struct vm_entry * vm_ent, 
+                                struct vm_area_struct * vma, char * path_buf) {
+
+    char * temp_str;
+
+    //struct anon_vma_name * anon_name = vma->vm_mm ? vma->anon_name : NULL;
+    struct anon_vma_name * anon_name = vma->vm_mm ? anon_vma_name(vma) : NULL;
+
+    //if this is a 'regular' vma
+    if (vma->vm_file) {
+
+        //if the user is using named anonymous mappings
+        if (anon_name) {
+            snprintf(vm_ent->file_path, PATH_MAX, lainko_procfs_shmem, anon_name->name);
+	} else {
+            temp_str = d_path(&vma->vm_file->f_path, path_buf, PATH_MAX);
+	    snprintf(vm_ent->file_path, PATH_MAX, temp_str);
+	    return;
+        }
+    } //end if 'regular' vma
+
+    //if vma has a special name
+    if (vma->vm_ops && vma->vm_ops->name) {
+        temp_str = (char *) vma->vm_ops->name(vma);
+        if (temp_str) {
+            snprintf(vm_ent->file_path, PATH_MAX, temp_str);
+        }
+        return;
+    }
+
+    temp_str = (char *) r_symbols.arch_vma_name(vma);
+    if (temp_str) {
+        snprintf(vm_ent->file_path, PATH_MAX, temp_str);
+    }
+
+    if (!vma->vm_mm) {
+        snprintf(vm_ent->file_path, PATH_MAX, lainko_procfs_vdso);
+        return;
+    }
+
+    if (vma_is_initial_heap(vma)) {
+        snprintf(vm_ent->file_path, PATH_MAX, lainko_procfs_heap);
+        return;
+    }
+
+    if (vma_is_initial_stack(vma)) {
+        snprintf(vm_ent->file_path, PATH_MAX, lainko_procfs_stack);
+        return;
+    }
+
+    if (anon_name) {
+        snprintf(vm_ent->file_path, PATH_MAX, lainko_procfs_anon, anon_name->name);
+        return;
+    }
 }
 
 
@@ -532,31 +621,17 @@ static void cleanup_map_operations(struct local_data * l_data_ptr) {
 static int build_vm_entry(struct vm_entry * vm_ent, 
                           struct vm_area_struct * vma, char * path_buf) {
 
-    char * path_str;
-
-
     //build vm_entry
     vm_ent->vm_start = vma->vm_start;
     vm_ent->vm_end   = vma->vm_end;
     vm_ent->file_off = vma->vm_pgoff;
-    vm_ent->prot     = vma->vm_page_prot.pgprot;
-   
-    //if no backing file, make path empty
-    if (vma->vm_file == NULL) {
-        vm_ent->file_path[0] = '\0';
-    
-    //otherwise get path string & set path buffer
-    } else {
-        path_str = d_path(&vma->vm_file->f_path, path_buf, PATH_MAX);
-        if (IS_ERR_OR_NULL(path_str)) {
-            return (int) PTR_ERR(path_str);
-        }
-
-        strncpy(vm_ent->file_path, path_str, PATH_MAX);
-    } //end if
+    vm_ent->prot     = vma->vm_flags;
+  
+    get_vma_name(vm_ent, vma, path_buf);
 
     return 0;
 }
+
 
 
 // --- IOCTL CALLS
@@ -583,6 +658,7 @@ static int memu_open_tgt(struct local_data * l_data_ptr, struct ioctl_arg * arg)
 	printk(KERN_INFO "[lainmemu][OK] failed to acquire mm_struct for %d.\n", arg->target_pid);
         return (int) PTR_ERR(mm_ret);
     }
+    l_data_ptr->target_mm = l_data_ptr->target_task->mm;
 
     return 0;
 }
@@ -644,7 +720,7 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
         }
 
         //advance loop state
-        vm_ent += 1;
+        vm_ent = vm_ent + 1;
         ++count;
 
     } //end while
@@ -653,13 +729,10 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
     //get gate vma    
     vma = r_symbols.get_gate_vma(l_data_ptr->target_mm);
 
-    //if no gate vma present (rare arch?)
-    if (vma == NULL) {
-        --count;
-    
-    //add gate vma to buffer
-    } else {
-        ret = build_vm_entry(vm_ent, vma, path_buf);
+    //add gate vma if present
+    if (vma != NULL) {
+
+	ret = build_vm_entry(vm_ent, vma, path_buf);
         if (ret) {
             cleanup_map_operations(l_data_ptr);
             vfree(path_buf);
@@ -668,7 +741,7 @@ static int memu_get_map(struct local_data * l_data_ptr, struct ioctl_arg * arg) 
         }
 
         //copy gate vma into transmission buffer
-        vm_ent += 1;
+        vm_ent = vm_ent + 1;
         ++count;
 
     } //end if
@@ -702,7 +775,6 @@ static int memu_get_map_sz(struct local_data * l_data_ptr) {
     ret = prepare_map_operations(l_data_ptr, &vma_iter);
     if (ret) return ret;
 
-
     //while there are VMAs left in this address space
     while ((vma = vma_next(&vma_iter)) != NULL) {
         
@@ -713,7 +785,7 @@ static int memu_get_map_sz(struct local_data * l_data_ptr) {
         }
 
     } //end while
-    
+
     //release locks
     cleanup_map_operations(l_data_ptr);
 
@@ -836,9 +908,6 @@ static int memu_open(struct inode * inode_ptr, struct file * file_ptr) {
           "[lainmemu][ERR] failed to allocate private data for open file.\n");
         return -ENOMEM;
     }
-
-    volatile char x = lainmemu_major;
-    printk("x = %x\n", lainmemu_major);
 
     printk(KERN_INFO "[lainmemu][OK] device successfully opened.\n");
 
