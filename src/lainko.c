@@ -977,8 +977,16 @@ static ssize_t memu_read(struct file * file_ptr,
 
     ssize_t read_bytes;
     struct local_data * l_data_ptr;
+    struct vm_area_struct * ret_vma;
 
     l_data_ptr = GET_LOCAL_DATA(file_ptr);
+
+    //check if addr is NULL
+    if (*off_ptr == NULL) return -EFAULT;
+
+    //check if address is mapped
+    ret_vma = find_vma(l_data_ptr->target_mm, *off_ptr);
+    if (ret_vma == NULL) return -EFAULT;
 
     //carry out the read
     read_bytes = mem_rw(l_data_ptr->target_mm, 
@@ -997,8 +1005,16 @@ static ssize_t memu_write(struct file * file_ptr,
 
     ssize_t write_bytes;
     struct local_data * l_data_ptr;
+    struct vm_area_struct * ret_vma;
 
     l_data_ptr = GET_LOCAL_DATA(file_ptr);
+
+    //check if addr is NULL
+    if (*off_ptr == NULL) return -EFAULT;
+
+    //check if address is mapped
+    ret_vma = find_vma(l_data_ptr->target_mm, *off_ptr);
+    if (ret_vma == NULL) return -EFAULT;
 
     //carry out the write
     write_bytes = mem_rw(l_data_ptr->target_mm, 
