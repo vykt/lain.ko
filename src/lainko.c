@@ -826,9 +826,6 @@ static ssize_t mem_rw(struct mm_struct * mm, char __user * u_buf,
     page = (lainko_byte *) __get_free_page(GFP_KERNEL);
     if (!page) return -ENOMEM;
 
-    //increment mm's refcount unless it is already 0
-    if (!mmget_not_zero(mm)) goto free;
-
     //while there is data to read/write
     while (count > 0) {
 
@@ -865,10 +862,6 @@ static ssize_t mem_rw(struct mm_struct * mm, char __user * u_buf,
     //update file position
     *off_ptr = remote_addr;
 
-    //decrease refcount of mm
-    mmput(mm);
-
-free:
 
     free_page((unsigned long) page); 
     return copied;
@@ -982,18 +975,28 @@ static ssize_t memu_read(struct file * file_ptr,
     l_data_ptr = GET_LOCAL_DATA(file_ptr);
 
     //check if addr is NULL
-    if (*off_ptr == NULL) return -EFAULT;
+    if (*off_ptr == 0) return -EFAULT;
+
+    //increment mm's refcount unless it is already 0
+    if (!mmget_not_zero(l_data_ptr->target_mm)) return -ESRCH;
 
     //check if address is mapped
     ret_vma = find_vma(l_data_ptr->target_mm, *off_ptr);
-    if (ret_vma == NULL) return -EFAULT;
+    if (ret_vma == NULL) {
+        mmput(l_data_ptr->target_mm);
+        return -EFAULT;
+    }
 
     //carry out the read
     read_bytes = mem_rw(l_data_ptr->target_mm, 
                         (char __user *) u_buf, count, off_ptr, MEMU_READ);
     if(read_bytes < 0) {
+        mmput(l_data_ptr->target_mm);
         return read_bytes;
     }
+
+    //decrease refcount of mm
+    mmput(l_data_ptr->target_mm);
 
     return 0;
 }
@@ -1010,11 +1013,17 @@ static ssize_t memu_write(struct file * file_ptr,
     l_data_ptr = GET_LOCAL_DATA(file_ptr);
 
     //check if addr is NULL
-    if (*off_ptr == NULL) return -EFAULT;
+    if (*off_ptr == 0) return -EFAULT;
+
+    //increment mm's refcount unless it is already 0
+    if (!mmget_not_zero(l_data_ptr->target_mm)) return -ESRCH;
 
     //check if address is mapped
     ret_vma = find_vma(l_data_ptr->target_mm, *off_ptr);
-    if (ret_vma == NULL) return -EFAULT;
+    if (ret_vma == NULL) {
+        mmput(l_data_ptr->target_mm);
+        return -EFAULT;
+    }
 
     //carry out the write
     write_bytes = mem_rw(l_data_ptr->target_mm, 
@@ -1022,6 +1031,9 @@ static ssize_t memu_write(struct file * file_ptr,
     if (write_bytes < 0) {
         return write_bytes;
     }
+
+    //decrease refcount of mm
+    mmput(l_data_ptr->target_mm);
 
     return 0;
 }
