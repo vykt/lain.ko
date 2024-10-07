@@ -1,7 +1,7 @@
 # lain.ko
 
 <p align="center">
-    <img src="lain.ko.png" width="100" height="100">
+    <img src="lain.ko.png" width="150" height="150">
 </p>
 
 ### ABOUT:
