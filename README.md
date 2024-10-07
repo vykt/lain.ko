@@ -40,56 +40,50 @@ Unload the module:
 
 The remainder of this document covers the raw interface to the <b>lain.ko</b> module. If you're interested in using <b>lain.ko</b> with [liblain](https://github.com/vykt/liblain), you can ignore the rest of this document. If you're writing your own userspace interface, read on.
 
+
 #### [introduction]
 
-The <b>lain.ko</b> module creates a character device <b>/dev/lainmemu</b> and a sysfs class <b>/sys/class/lain.ko</b>. The major number identifying the <b>lainmemu</b> device is generated dynamically. To find out it's value, the attribute file <b>/sys/class/lain.ko/lainmemu_major</b> exposes <b>lainmemu</b>'s major number.
-
-In the future, additional devices may be added to lain.ko to provide other features.
+The <b>lain.ko</b> module creates a character device `/dev/lainmemu` and a sysfs class `/sys/class/lain.ko`. The major number identifying the <b>lainmemu</b> device is generated dynamically. To find it's value, read the attribute file `/sys/class/lain.ko/lainmemu_major`.
 
 
 #### [the lainmemu device]
 
 The <b>lainmemu</b> character device defines the following file operations:
-```
-- open()  : Generic open.
-- close() : Generic close.
-- seek()  : Seek in the memory of a target process.
-- read()  : Read memory.
-- write() : Write memory.
-- ioctl() : Miscellaneous operations.
-```
+
+| Operation | Description                            |
+| --------- | -------------------------------------- |
+| `open()`  | Open device file                       |
+| `close()` | Close device file                      |
+| `seek()`  | Seek in the memory of a target process |
+| `read()`  | Read memory                            |
+| `write()` | Write memory                           |
+| `ioctl()` | Miscellaneous operations               |
+
 The following ioctl calls are defined:
-```
-- 1 : Open the target process.
-- 2 : Close the target process.
-- 3 : Get the number of vmas.
-- 4 : Get the memory map.
-```
+
+| Ioctl call    | Description                               |
+| ------------- | ----------------------------------------- |
+| `OPEN_TGT`    | Open a target                             |
+| `RELEASE_TGT` | Close a target                            |
+| `GET_MAP`     | Fill buffer with memory map               |
+| `GET_MAP_SZ`  | Retrieve required size of transfer buffer |
+
 
 #### [lainmemu file operations]
 
-The <b>lainmemu</b> device does not have to be shared. Each open call allocates private storage tied to that file descriptor. This means multiple 
-processes can make use of the lainmemu device simultaneously. This also means a single process may open the device multiple times to operate on multiple devices simultaneously.
+The <b>lainmemu</b> device does not have to be shared. Each open call allocates private storage tied to that file descriptor. This means multiple processes can make use of the <b>lainmemu</b> device simultaneously. This also means a single process may open the device multiple times to operate on multiple targets.
 
-The <b>seek()</b>, <b>read()</b>, and <b>write()</b> operations act on the memory of a target process. They should behave identically to operations performed on the <b>/proc/[pid]/mem</b> file.
+The `seek()`, `read()`, and `write()` operations act on the memory of a target process. They should behave identically to operations performed on the `/proc/[pid]/mem` file.
 
 
 #### [lainmemu ioctl calls]
 
-All ioctl calls take as their argument a userspace pointer to an instance of <b>struct ioct_arg</b> defined in <b>lain.ko.h</b>.
+All ioctl calls take as their argument a userspace pointer to an instance of `struct ioct_arg` defined in <b>lainko.h</b>.
 
-Before any operations on memory can be performed, a target process must be set. This is done by providing ioctl call #1 with the pid of the 
-target inside <b>struct ioct_arg</b>. An opened process will become a zombie until it is closed. A target process can be explicitly closed with ioctl call #2, or by simply closing the <b>lainmemu</b> file descriptor.
+Before any operations on memory can be performed, a target process must be set. This is done by providing ioctl call `OPEN_TGT` with the pid of the target inside `struct ioct_arg`. If the target exits, it will become a zombie until it is closed. A target process can be explicitly closed with ioctl call `RELEASE_TGT`, or by simply closing the <b>lainmemu</b> file descriptor.
 
-<b>Lainmemu</b> can also produce a memory map of the target process. This is a two step process:
+<b>lainmemu</b> can also produce a memory map of the target process. This is a two step process:
 
-1) Call ioctl #3, which will return the current number of virtual memory
-   areas in the target process, N. Due to concurrency, this number may 
-   grow immediately.
+1) Call ioctl `GET_MAP_SZ`, which returns the current number of virtual memory areas in the target process. Due to concurrency, this number may grow immediately.
 
-2) Allocate a buffer to hold the memory map, store a pointer to it in 
-   <b>struct ioctl_arg</b>, and call ioctl #4. On return, your buffer will 
-   contain an array of <b>struct vm_entry</b>, one for each virtual memory 
-   area. If your buffer is too small to hold the map, you will receive an 
-   incomplete map. As such, consider allocating a buffer that can hold 
-   N + 10% <b>vm_entry</b> structures.
+2) Allocate a buffer to hold the memory map, store a pointer to it in `struct ioctl_arg`, and call ioctl `GET_MAP`. On return, your buffer will contain an array of `struct vm_entry`, also defined in <b>lainko.h</b>. Each `struct vm_entry` instance represents one virtual memory area. If your buffer is too small due to memory map growth between the `GET_MAP_SZ` and `GET_MAP` ioctl calls, you will receive an incomplete map. <b>lainmemu</b> will typically request a buffer 10% larger than required to compensate for this.
