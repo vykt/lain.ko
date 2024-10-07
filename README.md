@@ -6,7 +6,7 @@
 
 ### ABOUT:
 
-The lain kernel module (<b>lain.ko</b>) provides an alternative kernel interface for accessing the memory and memory maps of processes on Linux. Unlike existing interfaces like procfs or ptrace, accesses through <b>lain.ko</b> can't be detected through system APIs. Detection from userspace is still possible, but your target will <i>really</i> need to know what they're doing. <b>lain.ko</b> is designed for use with [liblain](https://github.com/vykt/liblain).
+The lain kernel module (<b>lain.ko</b>) provides an alternative kernel interface for accessing the memory and memory maps of processes on Linux. Unlike existing interfaces like procfs or ptrace, accesses through <b>lain.ko</b> can't be detected through system APIs. Detection from userspace is still possible but is no longer trivial. <b>lain.ko</b> is designed for use with [liblain](https://github.com/vykt/liblain).
 
 
 ### INSTALLATION:
