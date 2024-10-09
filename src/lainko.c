@@ -18,6 +18,7 @@
 #include <linux/sched/mm.h>
 #include <linux/mm.h>
 #include <linux/mm_types.h>
+#include <linux/mm_inline.h>
 #include <linux/mempolicy.h>
 #include <linux/ptrace.h>
 

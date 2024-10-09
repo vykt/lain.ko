@@ -3,7 +3,7 @@ EXTRA_CFLAGS=-O1
 
 all:
 	#make -C /home/vykt/linux-source-6.10/ M=$(PWD) modules
-	make -C /usr/src/$(uname -r) modules
+	make -C /usr/src/linux-$(uname -r) modules
 
 clean:
 	#make -C /home/vykt/linux-source-6.10/ M=$(PWD) clean
